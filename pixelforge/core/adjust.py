@@ -119,7 +119,7 @@ def _detail(image: Image.Image, strength: float) -> Image.Image:
     # Soft-limit each band so strong edges do not ring.
     bands = np.tanh(bands / 26.0) * 26.0
     out = base + bands * amount * 1.9
-    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
+    return _to_image(out)
 
 
 def _clarity(image: Image.Image, strength: float) -> Image.Image:
@@ -135,7 +135,7 @@ def _clarity(image: Image.Image, strength: float) -> Image.Image:
     # Full effect in the midtones, fading to nothing at pure black and white.
     mask = 1.0 - np.square((luma / 255.0 - 0.5) * 2.0)
     out = base + (base - blurred) * (amount * 0.7) * mask[..., None]
-    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
+    return _to_image(out)
 
 
 def _vignette(image: Image.Image, strength: float) -> Image.Image:
@@ -147,4 +147,13 @@ def _vignette(image: Image.Image, strength: float) -> Image.Image:
     mask = np.clip(1.0 - amount * np.clip(radius - 0.45, 0, None) / 0.85, 0.0, 1.0)
     data = np.asarray(image, dtype=np.float32)
     data *= mask[..., None]
-    return Image.fromarray(np.clip(data, 0, 255).astype(np.uint8), "RGB")
+    return _to_image(data)
+
+
+def _to_image(data: np.ndarray) -> Image.Image:
+    """Clamp and round back to 8-bit.
+
+    ``astype(uint8)`` truncates, which silently discards every sub-unit change
+    a gentle filter makes. Rounding keeps them.
+    """
+    return Image.fromarray(np.clip(data, 0, 255).round().astype(np.uint8), "RGB")

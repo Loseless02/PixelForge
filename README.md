@@ -16,6 +16,10 @@ one-time model download.
   (1200x720), a long-edge target, or a preset (Full HD, 2K, 4K, 8K, A4 at
   300 dpi, Instagram, story, wallpaper).
 - **Live before/after** comparison with a draggable split handle, zoom and pan.
+  The "after" side runs the **real model** on a small proxy, so what you compare
+  is the actual result and not a Lanczos stand-in.
+- **Strength controls**: Fast / Balanced / Maximum, plus supersampling, test-time
+  augmentation, pass chaining, and detail/clarity recovery.
 - **Crop** with aspect-ratio lock, rule-of-thirds guides and pixel readout,
   plus rotate and flip.
 - **Filters and adjustments**: brightness, contrast, saturation, gamma,
@@ -28,9 +32,9 @@ one-time model download.
   touched.
 - **CLI** for scripting, sharing the exact same pipeline as the GUI.
 
-| Compare | Adjust | Light theme |
+| Compare | Strength | Light theme |
 | --- | --- | --- |
-| ![](docs/screenshot-compare.png) | ![](docs/screenshot-adjust.png) | ![](docs/screenshot-light.png) |
+| ![](docs/screenshot-compare.png) | ![](docs/screenshot-strength.png) | ![](docs/screenshot-light.png) |
 
 ---
 
@@ -95,6 +99,58 @@ When you ask for an exact size that does not match the source aspect ratio:
 
 ---
 
+## Strength — how hard to push
+
+Results land in `Pictures/upscaled` by default. Change it on the Export tab, or
+switch on "Save next to the original".
+
+| Preset | Passes | Oversample | TTA | Cost |
+| --- | --- | --- | --- | --- |
+| **Fast** | 1 | 1x | off | baseline |
+| **Balanced** | up to 2 | 1x | off | baseline |
+| **Maximum** | up to 3 | 2x | on | ~30x slower |
+
+- **Oversample** renders above the target and resamples back down. That is
+  supersampling: it averages out the model's per-pixel guesses, so edges come
+  back cleaner. It costs a whole extra AI pass.
+- **Test-time augmentation** runs the model over eight flips and rotations and
+  averages the results. Roughly 8x slower on its own.
+- **Detail** is multi-scale micro-contrast applied after the upscale — it splits
+  the image into a fine and a mid band and lifts each, which recovers texture
+  without the halo a single big unsharp mask leaves.
+- **Clarity** is large-radius local contrast, masked out of highlights and
+  shadows so it adds punch without crushing anything.
+
+### Does it actually do anything?
+
+Ground truth 1280x800, shrunk to 320x200, upscaled back. Measured on a
+GTX 1650:
+
+| Config | Time | PSNR | Sharpness | HF energy |
+| --- | --- | --- | --- | --- |
+| _ground truth_ | — | — | 4780 | 47.4 |
+| Lanczos only | 0.0s | **19.17** | 32 | 5.8 |
+| AI balanced | 5.5s | 15.97 | 2055 | 66.2 |
+| AI balanced + detail 50 | 5.3s | 14.53 | 3626 | 98.8 |
+| AI maximum | 180s | 14.99 | 3944 | 94.3 |
+| AI maximum + detail + clarity | 163s | 12.95 | 7624 | 146.8 |
+
+![Quality comparison](docs/quality-comparison.png)
+
+**Read that table carefully.** Lanczos wins on PSNR and loses badly to the eye.
+PSNR rewards a safe blurry average and punishes invented detail even when the
+invention is plausible — this is a known and well-documented property of
+GAN-based super-resolution, not a quirk of this build. Sharpness (variance of
+the Laplacian) tracks what you actually see: Lanczos reconstructs 32 against the
+ground truth's 4780, while AI balanced reaches 2055.
+
+Note also that "AI maximum + detail + clarity" overshoots the ground truth's
+sharpness by 1.6x. That is over-sharpening, not accuracy. Maximum is worth it
+for small or soft sources; for a decent photo, Balanced with detail around 30
+is usually the better-looking result and 30x faster.
+
+---
+
 ## Models
 
 | Model | Best for | Factors |
@@ -124,9 +180,16 @@ python -m pixelforge --cli portrait.jpg --size 1200x720 --fit cover --look resto
 python -m pixelforge --cli --list-devices
 ```
 
+```bash
+python -m pixelforge --cli old-scan.png --scale 4 --quality maximum --detail 40
+```
+
+Output goes to `Pictures/upscaled` unless you pass `-o` or `--next-to-source`.
+
 Useful flags: `--scale`, `--size WxH`, `--preset`, `--long-edge`, `--fit`,
 `--crop X,Y,W,H`, `--rotate`, `--model`, `--cpu`, `--tile`, `--look`,
-`--sharpen`, `--denoise`, `--format`, `--quality`, `--dry-run`.
+`--quality fast|balanced|maximum`, `--oversample`, `--tta`, `--max-chain`,
+`--detail`, `--clarity`, `--sharpen`, `--denoise`, `--format`, `--dry-run`.
 
 ---
 
@@ -139,6 +202,7 @@ Useful flags: `--scale`, `--size WxH`, `--preset`, `--long-edge`, `--fit`,
 | `Ctrl+Shift+Enter` | Run the whole queue |
 | `C` | Crop tool |
 | `B` | Before/after split |
+| `A` | AI preview on/off |
 | `Ctrl+0` / `Ctrl+1` | Fit to window / zoom to 100% |
 | `Ctrl+±` | Zoom in / out |
 | `Delete` | Remove the selected file from the queue |
@@ -155,6 +219,12 @@ Double-click a finished queue entry to reveal the output file.
 - **No infinite detail.** Real-ESRGAN reconstructs plausible texture; it does
   not recover information that was never captured. Past roughly 4x–8x, results
   smear. 400x600 to 8K will not look like an 8K photo.
+- **The AI preview is a proxy.** The source is capped to 520 px on its long edge
+  before the preview pass, so it is representative, not pixel-identical to the
+  full-size render. The final output always runs on the real source.
+- **Maximum is genuinely slow.** ~30x Balanced. On a big source it can mean
+  minutes per image. It also stacks more passes, and passes compound their own
+  artefacts — more is not automatically better.
 - **Text and logos** are the weak spot. The model hallucinates letterforms.
   Re-render vector sources instead of upscaling them.
 - **Heavy motion blur and out-of-focus shots** stay blurry. Super-resolution is

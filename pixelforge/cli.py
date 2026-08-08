@@ -79,8 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     out = parser.add_argument_group("output")
     out.add_argument("-f", "--format", default="PNG",
                      choices=[s.key for s in imageio.output_formats()])
-    out.add_argument("-q", "--quality", type=int, default=92,
-                     help="JPEG/WebP/AVIF quality, 40-100.")
+    out.add_argument("-q", "--image-quality", type=int, default=92,
+                     help="JPEG/WebP/AVIF encoder quality, 40-100. Not the same "
+                          "as --quality, which is upscaler strength.")
     out.add_argument("--suffix", default="_upscaled")
     out.add_argument("--overwrite", action="store_true")
     out.add_argument("--strip-metadata", action="store_true")
@@ -150,8 +151,8 @@ def settings_from_args(args: argparse.Namespace) -> EditSettings:
         settings.adjustments.grayscale = True
 
     settings.export.format = args.format
-    settings.export.jpeg_quality = args.quality
-    settings.export.webp_quality = args.quality
+    settings.export.jpeg_quality = args.image_quality
+    settings.export.webp_quality = args.image_quality
     settings.export.suffix = args.suffix
     settings.export.overwrite_policy = "overwrite" if args.overwrite else "suffix"
     settings.export.keep_metadata = not args.strip_metadata
