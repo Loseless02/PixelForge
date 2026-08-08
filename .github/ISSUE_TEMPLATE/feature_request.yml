@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest something PixelForge should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that PixelForge makes hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - label: Upscaling / models
+        - label: Resize, crop, rotate
+        - label: Filters and adjustments
+        - label: Export formats
+        - label: Batch queue
+        - label: Interface

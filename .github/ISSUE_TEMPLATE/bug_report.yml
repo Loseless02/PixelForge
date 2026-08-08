@@ -1,0 +1,41 @@
+name: Bug report
+description: Something does not work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      placeholder: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: image
+    attributes:
+      label: Source image
+      description: Format and pixel size, e.g. "JPEG 4000x3000".
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options: ["Real-ESRGAN (AI)", "Classic resample", "Not sure"]
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: Shown in the status bar, bottom right.
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python version
+      placeholder: "Windows 11, Python 3.12"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Run with `python run.py` from a terminal and paste anything printed.
+      render: shell

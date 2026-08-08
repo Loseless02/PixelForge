@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelforge"
+version = "1.0.0"
+description = "Offline AI image upscaler, editor and batch converter."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "PixelForge contributors" }]
+keywords = ["upscale", "super-resolution", "real-esrgan", "image", "gui", "offline"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+formats = [
+    "pillow-heif>=0.15",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-qt>=4.2",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/pixelforge"
+Issues = "https://github.com/your-org/pixelforge/issues"
+
+[project.scripts]
+pixelforge-cli = "pixelforge.cli:main"
+
+[project.gui-scripts]
+pixelforge = "pixelforge.app:main"
+
+[tool.setuptools.packages.find]
+include = ["pixelforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: needs the Real-ESRGAN runtime and a GPU; deselect with -m 'not slow'",
+]
+
+[tool.ruff]
+line-length = 92
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "N802",   # Qt overrides and signals use camelCase
+    "N803",
+    "N806",
+    "N815",
+    "N818",   # `Cancelled` reads better than `CancelledError` next to Qt's API
+    "B008",
+    "RUF012",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"pixelforge/gui/icons.py" = ["E501"]  # inline SVG path data
