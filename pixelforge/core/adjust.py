@@ -40,6 +40,10 @@ def apply(image: Image.Image, adj: Adjustments) -> Image.Image:
         rgb = _denoise(rgb, adj.denoise)
     if adj.blur > 0:
         rgb = rgb.filter(ImageFilter.GaussianBlur(radius=adj.blur))
+    if adj.clarity > 0:
+        rgb = _clarity(rgb, adj.clarity)
+    if adj.detail > 0:
+        rgb = _detail(rgb, adj.detail)
     if adj.sharpness != 1.0:
         rgb = ImageEnhance.Sharpness(rgb).enhance(adj.sharpness)
     if adj.unsharp_amount > 0:
@@ -96,6 +100,42 @@ def _denoise(image: Image.Image, strength: float) -> Image.Image:
     radius = 1 if strength < 50 else 2
     smoothed = image.filter(ImageFilter.MedianFilter(size=radius * 2 + 1))
     return Image.blend(image, smoothed, min(1.0, strength / 100.0))
+
+
+def _detail(image: Image.Image, strength: float) -> Image.Image:
+    """Multi-scale micro-contrast.
+
+    A single unsharp mask at one radius either misses fine texture or rings
+    around edges. Splitting the image into a fine band and a mid band and
+    boosting each separately recovers texture that survived the upscale
+    without the white halo a big single-radius mask produces.
+    """
+    amount = min(1.0, strength / 100.0)
+    base = np.asarray(image, dtype=np.float32)
+    fine = np.asarray(image.filter(ImageFilter.GaussianBlur(0.8)), dtype=np.float32)
+    mid = np.asarray(image.filter(ImageFilter.GaussianBlur(2.4)), dtype=np.float32)
+
+    bands = (base - fine) * 0.65 + (fine - mid) * 0.45
+    # Soft-limit each band so strong edges do not ring.
+    bands = np.tanh(bands / 26.0) * 26.0
+    out = base + bands * amount * 1.9
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
+
+
+def _clarity(image: Image.Image, strength: float) -> Image.Image:
+    """Large-radius local contrast, masked away from highlights and shadows."""
+    amount = min(1.0, strength / 100.0)
+    radius = max(3.0, min(image.size) / 55.0)
+    base = np.asarray(image, dtype=np.float32)
+    blurred = np.asarray(
+        image.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32
+    )
+
+    luma = base @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    # Full effect in the midtones, fading to nothing at pure black and white.
+    mask = 1.0 - np.square((luma / 255.0 - 0.5) * 2.0)
+    out = base + (base - blurred) * (amount * 0.7) * mask[..., None]
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB")
 
 
 def _vignette(image: Image.Image, strength: float) -> Image.Image:

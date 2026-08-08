@@ -75,6 +75,8 @@ class Adjustments:
     denoise: float = 0.0        # 0 .. 100, edge-preserving
     unsharp_amount: float = 0.0  # 0 .. 300 (%)
     unsharp_radius: float = 2.0
+    detail: float = 0.0         # 0 .. 100, multi-scale micro-contrast
+    clarity: float = 0.0        # 0 .. 100, large-radius local contrast
     grayscale: bool = False
     sepia: bool = False
     invert: bool = False
@@ -94,6 +96,8 @@ class Adjustments:
             and self.blur == 0.0
             and self.denoise == 0.0
             and self.unsharp_amount == 0.0
+            and self.detail == 0.0
+            and self.clarity == 0.0
             and not self.grayscale
             and not self.sepia
             and not self.invert
@@ -142,6 +146,12 @@ class EditSettings:
     resample: str = "lanczos"       # classic resampler / final down-step
     denoise_level: int = -1         # animevideov3 only, -1 = n/a
     face_enhance: bool = False
+
+    # strength
+    quality: str = "balanced"       # fast | balanced | maximum | custom
+    oversample: float = 1.0         # render this much above the target, then downscale
+    tta: bool = False               # test-time augmentation: ~8x slower, cleaner edges
+    max_chain: int = 2              # how many AI passes may be stacked
 
     # look
     adjustments: Adjustments = field(default_factory=Adjustments)

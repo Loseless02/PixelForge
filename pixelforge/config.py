@@ -42,6 +42,29 @@ def cache_dir() -> Path:
     return path
 
 
+def pictures_dir() -> Path:
+    """The user's Pictures folder, honouring Windows folder redirection."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+                value, _ = winreg.QueryValueEx(handle, "My Pictures")
+            path = Path(os.path.expandvars(value))
+            if path.is_dir():
+                return path
+        except OSError:
+            pass  # redirected folder unreadable; fall back to the home guess
+    candidate = Path.home() / "Pictures"
+    return candidate if candidate.is_dir() else Path.home()
+
+
+def default_output_dir() -> Path:
+    """Where upscaled files land unless the user picks somewhere else."""
+    return pictures_dir() / "upscaled"
+
+
 SETTINGS_FILE = user_data_dir() / "settings.json"
 
 
@@ -52,7 +75,8 @@ class AppSettings:
     theme: str = "dark"
     accent: str = "#6D5EF8"
     last_input_dir: str = ""
-    last_output_dir: str = ""
+    output_dir: str = ""            # empty = default_output_dir()
+    save_next_to_source: bool = False
     default_model: str = "realesrgan-x4plus"
     default_format: str = "PNG"
     jpeg_quality: int = 92

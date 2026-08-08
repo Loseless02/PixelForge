@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QColorDialog,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...config import default_output_dir
 from ...core import imageio
 from ...core.backends import BACKENDS, available_backends
 from ...core.backends.classic import RESAMPLER_LABELS
@@ -35,7 +36,13 @@ from ...core.models import (
     Rotation,
     SizeMode,
 )
-from ...core.presets import ASPECT_RATIOS, LOOK_PRESETS, RESOLUTION_PRESETS
+from ...core.presets import (
+    ASPECT_RATIOS,
+    LOOK_PRESETS,
+    QUALITY_BY_KEY,
+    QUALITY_PRESETS,
+    RESOLUTION_PRESETS,
+)
 from .. import icons
 from .controls import (
     Card,
@@ -83,6 +90,10 @@ class SettingsPanel(QWidget):
         self._loading = False
         self._source_size = (0, 0)
         self.output_dir: Path | None = None
+        # Keyed by ``Adjustments`` field name; the widgets live on whichever tab
+        # makes sense for the user, but load/reset/look sync happens here.
+        self.sliders: dict[str, SliderRow] = {}
+        self.flag_toggles: dict[str, LabeledToggle] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -335,6 +346,61 @@ class SettingsPanel(QWidget):
         card.add(self.model_hint)
         layout.addWidget(card)
 
+        strength_card = Card("Strength")
+        self._quality_keys = [p.key for p in QUALITY_PRESETS]
+        self.quality_seg = SegmentedControl([p.label for p in QUALITY_PRESETS])
+        self.quality_seg.changed.connect(self._on_quality)
+        strength_card.add(self.quality_seg)
+        self.quality_hint = hint("")
+        strength_card.add(self.quality_hint)
+
+        strength_card.add(divider())
+        self.oversample_slider = SliderRow(
+            "Oversample", 1.0, 3.0, 1.0, scale=10, decimals=1, suffix="x",
+            tooltip="Render this much above the target, then resample down. "
+                    "Supersampling averages out the model's guesses.",
+        )
+        self.oversample_slider.valueChanged.connect(self._on_oversample)
+        strength_card.add(self.oversample_slider)
+
+        self.tta_toggle = LabeledToggle(
+            "Test-time augmentation", False,
+            "Runs the model over eight flips and rotations and averages them. "
+            "About 8x slower, cleaner edges and fewer artefacts.",
+        )
+        self.tta_toggle.toggled.connect(self._on_tta)
+        strength_card.add(self.tta_toggle)
+
+        self.chain_slider = SliderRow(
+            "Max AI passes", 1.0, 3.0, 2.0, scale=1, decimals=0,
+            tooltip="How many times the model may be stacked. More passes reach "
+                    "bigger targets, and compound their own artefacts.",
+        )
+        self.chain_slider.valueChanged.connect(self._on_chain)
+        strength_card.add(self.chain_slider)
+
+        strength_card.add(divider())
+        self.detail_slider = SliderRow(
+            "Detail", 0.0, 100.0, 0.0, scale=1, decimals=0,
+            tooltip="Multi-scale micro-contrast applied after the upscale. "
+                    "Recovers texture the model smoothed over.",
+        )
+        self.detail_slider.valueChanged.connect(lambda v: self._set_adjust("detail", v))
+        self.sliders["detail"] = self.detail_slider
+        strength_card.add(self.detail_slider)
+
+        self.clarity_slider = SliderRow(
+            "Clarity", 0.0, 100.0, 0.0, scale=1, decimals=0,
+            tooltip="Large-radius local contrast, kept out of highlights and "
+                    "shadows. Adds punch without crushing the image.",
+        )
+        self.clarity_slider.valueChanged.connect(
+            lambda v: self._set_adjust("clarity", v)
+        )
+        self.sliders["clarity"] = self.clarity_slider
+        strength_card.add(self.clarity_slider)
+        layout.addWidget(strength_card)
+
         quality_card = Card("Resampling")
         resample_label = QLabel("Final resample")
         resample_label.setObjectName("Hint")
@@ -406,7 +472,6 @@ class SettingsPanel(QWidget):
         layout.addWidget(look_card)
 
         tone_card = Card("Tone")
-        self.sliders: dict[str, SliderRow] = {}
         for key, label, low, high, default, scale, decimals, suffix in (
             ("brightness", "Brightness", 0.0, 2.5, 1.0, 100, 2, ""),
             ("contrast", "Contrast", 0.0, 2.5, 1.0, 100, 2, ""),
@@ -432,7 +497,6 @@ class SettingsPanel(QWidget):
 
         toggles = QGridLayout()
         toggles.setSpacing(6)
-        self.flag_toggles: dict[str, LabeledToggle] = {}
         for index, (key, label) in enumerate((
             ("grayscale", "Black and white"),
             ("sepia", "Sepia"),
@@ -529,16 +593,28 @@ class SettingsPanel(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Same folder as the source file")
         self.output_edit.setReadOnly(True)
         self.browse_button = QPushButton("Browse")
         self.browse_button.clicked.connect(self._pick_output_dir)
-        self.clear_output = IconButton("close", "Use the source folder", 14)
-        self.clear_output.clicked.connect(self._clear_output_dir)
+        self.clear_output = IconButton("reset", "Back to the default folder", 14)
+        self.clear_output.clicked.connect(self._reset_output_dir)
         row.addWidget(self.output_edit, 1)
         row.addWidget(self.browse_button, 0)
         row.addWidget(self.clear_output, 0)
         dest_card.add_layout(row)
+
+        self.next_to_source = LabeledToggle(
+            "Save next to the original", False,
+            "Write each result into the same folder as its source file instead "
+            "of the folder above.",
+        )
+        self.next_to_source.toggled.connect(self._on_next_to_source)
+        dest_card.add(self.next_to_source)
+
+        self.open_output_button = QPushButton("Open output folder")
+        self.open_output_button.setObjectName("Ghost")
+        self.open_output_button.clicked.connect(self._open_output_dir)
+        dest_card.add(self.open_output_button)
 
         suffix_row = QHBoxLayout()
         suffix_label = QLabel("Suffix")
@@ -615,6 +691,16 @@ class SettingsPanel(QWidget):
             self._reload_models(settings.model)
             self._select_data(self.resample_combo, settings.resample)
 
+            if settings.quality in self._quality_keys:
+                self.quality_seg.set_current(self._quality_keys.index(settings.quality))
+            preset = QUALITY_BY_KEY.get(settings.quality)
+            self.quality_hint.setText(
+                preset.description if preset else "Custom strength settings."
+            )
+            self.oversample_slider.set_value(settings.oversample)
+            self.tta_toggle.setChecked(settings.tta)
+            self.chain_slider.set_value(float(settings.max_chain))
+
             adjustments = settings.adjustments
             for key, row in self.sliders.items():
                 row.set_value(float(getattr(adjustments, key)))
@@ -667,10 +753,12 @@ class SettingsPanel(QWidget):
                        self.clear_output):
             button.apply_color(palette.text_dim)
         for row in (*self.sliders.values(), self.scale_slider, self.percent_slider,
-                    self.jpeg_quality, self.webp_quality, self.png_compression):
+                    self.jpeg_quality, self.webp_quality, self.png_compression,
+                    self.oversample_slider, self.chain_slider):
             row.apply_color(palette.text_faint)
         for toggle in (*self.flag_toggles.values(), self.gpu_toggle, self.keep_metadata,
-                       self.strip_gps, self.webp_lossless):
+                       self.strip_gps, self.webp_lossless, self.tta_toggle,
+                       self.next_to_source):
             toggle.switch.set_colors(palette.surface_high, palette.accent, palette.text)
         self.crop_toggle.setIcon(icons.icon("crop", palette.text, 16))
 
@@ -823,6 +911,39 @@ class SettingsPanel(QWidget):
         self._loading = False
         self._emit()
 
+    def _on_quality(self, index: int) -> None:
+        preset = QUALITY_PRESETS[index]
+        self.settings.quality = preset.key
+        self.settings.oversample = preset.oversample
+        self.settings.tta = preset.tta
+        self.settings.max_chain = preset.max_chain
+        self._loading = True
+        self.oversample_slider.set_value(preset.oversample)
+        self.tta_toggle.setChecked(preset.tta)
+        self.chain_slider.set_value(float(preset.max_chain))
+        self._loading = False
+        self.quality_hint.setText(preset.description)
+        self._emit()
+
+    def _mark_custom_quality(self) -> None:
+        """Any manual tweak drops the named preset."""
+        if self._loading:
+            return
+        self.settings.quality = "custom"
+        self.quality_hint.setText("Custom strength settings.")
+
+    def _on_oversample(self, value: float) -> None:
+        self._mark_custom_quality()
+        self._set("oversample", value)
+
+    def _on_tta(self, value: bool) -> None:
+        self._mark_custom_quality()
+        self._set("tta", value)
+
+    def _on_chain(self, value: float) -> None:
+        self._mark_custom_quality()
+        self._set("max_chain", int(value))
+
     def _on_backend(self, index: int) -> None:
         key = self._backend_keys[index]
         self.settings.backend = key
@@ -872,18 +993,39 @@ class SettingsPanel(QWidget):
         self.webp_lossless.setVisible(fmt == "WEBP")
         self.png_compression.setVisible(fmt == "PNG")
 
+    def set_output_dir(self, path: Path | None, next_to_source: bool = False) -> None:
+        """Point the destination row at ``path``; ``None`` means source folder."""
+        self._chosen_dir = path or default_output_dir()
+        self.output_dir = None if next_to_source else self._chosen_dir
+        self.output_edit.setText(str(self._chosen_dir))
+        self.output_edit.setEnabled(not next_to_source)
+        self.browse_button.setEnabled(not next_to_source)
+        self.clear_output.setEnabled(not next_to_source)
+        self._loading = True
+        self.next_to_source.setChecked(next_to_source)
+        self._loading = False
+
+    def _on_next_to_source(self, value: bool) -> None:
+        self.set_output_dir(getattr(self, "_chosen_dir", None), value)
+        self._emit()
+
     def _pick_output_dir(self) -> None:
-        start = str(self.output_dir) if self.output_dir else ""
+        start = str(self.output_dir or default_output_dir())
         chosen = QFileDialog.getExistingDirectory(self, "Choose an output folder", start)
         if chosen:
-            self.output_dir = Path(chosen)
-            self.output_edit.setText(chosen)
+            self.set_output_dir(Path(chosen), self.next_to_source.isChecked())
             self._emit()
 
-    def _clear_output_dir(self) -> None:
-        self.output_dir = None
-        self.output_edit.clear()
+    def _reset_output_dir(self) -> None:
+        self.set_output_dir(default_output_dir(), self.next_to_source.isChecked())
         self._emit()
+
+    def _open_output_dir(self) -> None:
+        target = self.output_dir or getattr(self, "_chosen_dir", None)
+        if target is None:
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def _pick_background(self) -> None:
         current = QColor(self.settings.export.background)

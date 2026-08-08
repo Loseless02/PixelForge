@@ -29,6 +29,8 @@ from .models import EditSettings, FitMode, Job, JobStatus, SizeMode
 ProgressFn = Callable[[float, str], None]
 
 PREVIEW_MAX_EDGE = 1400
+AI_PREVIEW_MAX_EDGE = 1100
+AI_PREVIEW_SOURCE_CAP = 520
 
 
 class RenderResult:
@@ -108,6 +110,36 @@ def fit_to_target(
     return base
 
 
+def plan_factors(
+    src_w: int, src_h: int, target_w: int, target_h: int, settings: EditSettings
+) -> list[int]:
+    """AI passes this job will run, honouring the quality settings."""
+    backend = get_backend(settings.backend)
+    if backend.key == "classic":
+        return []
+    factors = geometry.plan_ai_factor(
+        src_w,
+        src_h,
+        target_w,
+        target_h,
+        available=backend.supported_factors(settings.model),
+        max_chain=max(1, settings.max_chain),
+        oversample=settings.oversample,
+    )
+    # Supersampling is only worth an extra pass while it stays inside the
+    # memory guard; otherwise fall back to the plain covering chain.
+    while factors and geometry.plan_pixels(src_w, src_h, factors) > geometry.MAX_PIXELS:
+        factors = factors[:-1]
+        if not factors:
+            factors = geometry.plan_ai_factor(
+                src_w, src_h, target_w, target_h,
+                available=backend.supported_factors(settings.model),
+                max_chain=1,
+            )
+            break
+    return factors
+
+
 def upscale_stage(
     image: Image.Image,
     settings: EditSettings,
@@ -125,13 +157,7 @@ def upscale_stage(
     if backend.key == "classic":
         return image
 
-    factors = geometry.plan_ai_factor(
-        image.width,
-        image.height,
-        target_w,
-        target_h,
-        available=backend.supported_factors(settings.model),
-    )
+    factors = plan_factors(image.width, image.height, target_w, target_h, settings)
     if not factors:
         return image
 
@@ -149,6 +175,7 @@ def upscale_stage(
             tile_size=tile_size,
             gpu_id=gpu_id,
             use_gpu=use_gpu,
+            tta=settings.tta,
             progress=step,
             cancel=cancel,
         )
@@ -214,6 +241,16 @@ def render(
     return image
 
 
+def preview_size(
+    loaded: imageio.LoadedImage, settings: EditSettings, max_edge: int
+) -> tuple[int, int, Image.Image]:
+    """Preview box for these settings, plus the cropped/rotated source."""
+    image = apply_geometry_stage(loaded.image, settings)
+    target_w, target_h = geometry.resolve_target(image.width, image.height, settings)
+    scale = min(1.0, max_edge / max(target_w, target_h))
+    return max(1, round(target_w * scale)), max(1, round(target_h * scale)), image
+
+
 def render_preview(
     loaded: imageio.LoadedImage,
     settings: EditSettings,
@@ -222,14 +259,10 @@ def render_preview(
     """Fast, AI-free approximation for the live preview pane.
 
     Adjustments are exact; the upscale is simulated with Lanczos so the pane
-    stays interactive while sliders move.
+    stays interactive while sliders move. :func:`render_ai_preview` replaces it
+    once the settings stop changing.
     """
-    image = apply_geometry_stage(loaded.image, settings)
-    target_w, target_h = geometry.resolve_target(image.width, image.height, settings)
-
-    scale = min(1.0, max_edge / max(target_w, target_h))
-    preview_w = max(1, round(target_w * scale))
-    preview_h = max(1, round(target_h * scale))
+    preview_w, preview_h, image = preview_size(loaded, settings, max_edge)
 
     # Downscale the source first when it dwarfs the preview box — much faster
     # and visually identical at preview resolution.
@@ -244,24 +277,66 @@ def render_preview(
     return adjust.apply(image, settings.adjustments)
 
 
+def render_ai_preview(
+    loaded: imageio.LoadedImage,
+    settings: EditSettings,
+    max_edge: int = AI_PREVIEW_MAX_EDGE,
+    *,
+    source_cap: int = AI_PREVIEW_SOURCE_CAP,
+    tile_size: int = 0,
+    gpu_id: int = 0,
+    use_gpu: bool = True,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+) -> Image.Image:
+    """Preview that actually runs the model, so the split view means something.
+
+    The source is capped to ``source_cap`` pixels on its long edge first. The
+    model sees a representative amount of detail per pixel, one pass takes a
+    second or two instead of a minute, and the result is resampled into the
+    same box the fast preview uses so the two can swap seamlessly.
+    """
+    preview_w, preview_h, image = preview_size(loaded, settings, max_edge)
+
+    if max(image.size) > source_cap:
+        image = ImageOps.contain(
+            image, (source_cap, source_cap), Image.Resampling.LANCZOS
+        )
+
+    image = upscale_stage(
+        image,
+        settings,
+        preview_w,
+        preview_h,
+        tile_size=tile_size,
+        gpu_id=gpu_id,
+        use_gpu=use_gpu,
+        progress=progress,
+        cancel=cancel,
+    )
+    if cancel is not None and cancel.is_set():
+        raise Cancelled("cancelled")
+
+    image = fit_to_target(
+        image, preview_w, preview_h, effective_fit(settings), settings.resample,
+        settings.export.background,
+    )
+    return adjust.apply(image, settings.adjustments)
+
+
 def plan_summary(width: int, height: int, settings: EditSettings) -> str:
     """One-line description of what running this job would do."""
     src_w, src_h = geometry.source_after_transform(width, height, settings)
     target_w, target_h = geometry.resolve_target(src_w, src_h, settings)
-    backend = get_backend(settings.backend)
-    factors: list[int] = []
-    if backend.key != "classic":
-        factors = geometry.plan_ai_factor(
-            src_w, src_h, target_w, target_h,
-            available=backend.supported_factors(settings.model),
-        )
+    factors = plan_factors(src_w, src_h, target_w, target_h, settings)
     if not factors:
         return f"{src_w}x{src_h} to {target_w}x{target_h} · resample only"
     product = math.prod(factors)
     chain = "+".join(f"x{f}" for f in factors)
+    extras = " · TTA" if settings.tta else ""
     return (
         f"{src_w}x{src_h} to {target_w}x{target_h} · AI {chain} "
-        f"({src_w * product}x{src_h * product}) then resample"
+        f"({src_w * product}x{src_h * product}) then resample{extras}"
     )
 
 

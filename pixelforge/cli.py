@@ -10,10 +10,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from .config import default_output_dir
 from .core import imageio, pipeline
 from .core.backends import BACKENDS, available_backends
 from .core.models import CropRect, EditSettings, FitMode, Job, Rotation, SizeMode
-from .core.presets import LOOKS_BY_KEY, PRESETS_BY_KEY
+from .core.presets import LOOKS_BY_KEY, PRESETS_BY_KEY, QUALITY_BY_KEY
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,7 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("inputs", nargs="*", type=Path,
                         help="Image files or folders.")
     parser.add_argument("-o", "--output", type=Path,
-                        help="Output folder (default: alongside each source).")
+                        help=f"Output folder (default: {default_output_dir()}).")
+    parser.add_argument("--next-to-source", action="store_true",
+                        help="Write each result beside its source file instead.")
 
     size = parser.add_argument_group("size")
     size.add_argument("-s", "--scale", type=float,
@@ -48,6 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
     ai.add_argument("--gpu-id", type=int, default=0)
     ai.add_argument("--tile", type=int, default=0,
                     help="Tile size; lower it if you run out of video memory.")
+
+    strength = parser.add_argument_group("strength")
+    strength.add_argument("--quality", choices=sorted(QUALITY_BY_KEY),
+                          default="balanced",
+                          help="fast, balanced or maximum. Sets the three flags below.")
+    strength.add_argument("--oversample", type=float,
+                          help="Render this much above the target, then downsample.")
+    strength.add_argument("--tta", action="store_true",
+                          help="Test-time augmentation: ~8x slower, cleaner edges.")
+    strength.add_argument("--max-chain", type=int,
+                          help="How many AI passes may be stacked (1-3).")
+    strength.add_argument("--detail", type=float, metavar="0-100",
+                          help="Multi-scale micro-contrast after the upscale.")
+    strength.add_argument("--clarity", type=float, metavar="0-100",
+                          help="Large-radius local contrast after the upscale.")
 
     look = parser.add_argument_group("look")
     look.add_argument("--look", choices=sorted(LOOKS_BY_KEY),
@@ -102,6 +120,21 @@ def settings_from_args(args: argparse.Namespace) -> EditSettings:
         x, y, width, height = (int(v) for v in args.crop.split(","))
         settings.crop = CropRect(x, y, width, height)
 
+    quality = QUALITY_BY_KEY[args.quality]
+    settings.quality = quality.key
+    settings.oversample = quality.oversample
+    settings.tta = quality.tta
+    settings.max_chain = quality.max_chain
+    if args.oversample is not None:
+        settings.oversample = args.oversample
+        settings.quality = "custom"
+    if args.tta:
+        settings.tta = True
+        settings.quality = "custom"
+    if args.max_chain is not None:
+        settings.max_chain = max(1, min(3, args.max_chain))
+        settings.quality = "custom"
+
     if args.look:
         preset = LOOKS_BY_KEY[args.look]
         settings.adjustments = type(preset.adjustments)(**preset.adjustments.__dict__)
@@ -109,6 +142,10 @@ def settings_from_args(args: argparse.Namespace) -> EditSettings:
         settings.adjustments.unsharp_amount = args.sharpen
     if args.denoise is not None:
         settings.adjustments.denoise = args.denoise
+    if args.detail is not None:
+        settings.adjustments.detail = args.detail
+    if args.clarity is not None:
+        settings.adjustments.clarity = args.clarity
     if args.grayscale:
         settings.adjustments.grayscale = True
 
@@ -163,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         settings.backend = "classic"
 
+    out_dir = None if args.next_to_source else (args.output or default_output_dir())
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
     failures = 0
     for index, path in enumerate(files, start=1):
         job = Job(source=path, settings=settings.copy())
@@ -186,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             result = pipeline.run_job(
-                job, args.output,
+                job, out_dir,
                 tile_size=args.tile, gpu_id=args.gpu_id, use_gpu=not args.cpu,
                 progress=progress,
             )

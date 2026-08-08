@@ -122,6 +122,7 @@ class RealesrganBackend(UpscaleBackend):
         tile_size: int = 0,
         gpu_id: int = 0,
         use_gpu: bool = True,
+        tta: bool = False,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> Image.Image:
@@ -154,6 +155,8 @@ class RealesrganBackend(UpscaleBackend):
             ]
             if tile_size > 0:
                 command += ["-t", str(tile_size)]
+            if tta:
+                command.append("-x")
 
             self._run(command, progress, cancel, factor, model)
 

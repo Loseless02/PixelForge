@@ -57,6 +57,37 @@ ASPECT_RATIOS: tuple[tuple[str, float | None], ...] = (
 
 
 @dataclass(frozen=True)
+class QualityPreset:
+    """How hard the upscaler is allowed to work."""
+
+    key: str
+    label: str
+    oversample: float
+    tta: bool
+    max_chain: int
+    description: str
+
+
+QUALITY_PRESETS: tuple[QualityPreset, ...] = (
+    QualityPreset(
+        "fast", "Fast", 1.0, False, 1,
+        "One AI pass, then resample. Quickest, lowest video memory.",
+    ),
+    QualityPreset(
+        "balanced", "Balanced", 1.0, False, 2,
+        "Smallest AI chain that covers the target. Good default.",
+    ),
+    QualityPreset(
+        "maximum", "Maximum", 2.0, True, 3,
+        "Renders 2x above the target and downsamples, with test-time "
+        "augmentation. Roughly 10-30x slower, visibly cleaner edges.",
+    ),
+)
+
+QUALITY_BY_KEY = {p.key: p for p in QUALITY_PRESETS}
+
+
+@dataclass(frozen=True)
 class LookPreset:
     key: str
     label: str
@@ -93,7 +124,12 @@ LOOK_PRESETS: tuple[LookPreset, ...] = (
     LookPreset(
         "restore",
         "Restore",
-        Adjustments(auto_contrast=True, denoise=25.0, unsharp_amount=80.0),
+        Adjustments(auto_contrast=True, denoise=25.0, unsharp_amount=80.0, detail=30.0),
+    ),
+    LookPreset(
+        "crisp",
+        "Crisp",
+        Adjustments(detail=55.0, clarity=25.0, contrast=1.05),
     ),
     LookPreset(
         "hdr", "HDR pop", Adjustments(equalize=True, saturation=1.15, contrast=1.05)

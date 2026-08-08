@@ -63,6 +63,7 @@ class ClassicBackend(UpscaleBackend):
         tile_size: int = 0,
         gpu_id: int = 0,
         use_gpu: bool = True,
+        tta: bool = False,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> Image.Image:

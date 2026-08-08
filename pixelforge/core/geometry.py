@@ -118,20 +118,25 @@ def plan_ai_factor(
     target_h: int,
     available: tuple[int, ...] = (2, 3, 4),
     max_chain: int = 2,
+    oversample: float = 1.0,
 ) -> list[int]:
     """Smallest chain of AI passes whose product covers the requested growth.
 
     ``[]`` means the target is not larger than the source, so no AI pass is
     worth running — plain resampling handles it.
 
+    ``oversample`` deliberately overshoots: rendering above the target and
+    resampling back down is supersampling, which averages away the model's
+    per-pixel guesses and leaves cleaner edges. It costs a whole extra pass.
+
     >>> plan_ai_factor(400, 600, 1200, 720)
-    [2]
+    [3]
     >>> plan_ai_factor(400, 600, 3840, 2160)
-    [4]
+    [3, 4]
     >>> plan_ai_factor(200, 200, 3200, 3200)
     [4, 4]
     """
-    needed = max(target_w / src_w, target_h / src_h)
+    needed = max(target_w / src_w, target_h / src_h) * max(1.0, oversample)
     if needed <= 1.0:
         return []
 
@@ -156,6 +161,12 @@ def plan_ai_factor(
         count = min(max_chain, max(1, math.ceil(math.log(needed, top))))
         best = [top] * count
     return best
+
+
+def plan_pixels(src_w: int, src_h: int, factors: list[int]) -> int:
+    """Peak pixel count the AI chain will hold in memory."""
+    product = math.prod(factors) if factors else 1
+    return src_w * product * src_h * product
 
 
 def describe_plan(

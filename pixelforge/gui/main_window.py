@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -41,7 +42,7 @@ from .widgets.queue_panel import QueuePanel, placeholder_thumb
 from .widgets.settings_panel import SettingsPanel
 from .widgets.titlebar import TitleBar
 from .widgets.toast import ToastHost
-from .workers import BatchWorker, LoadTask, PreviewTask, ProbeWorker
+from .workers import AiPreviewTask, BatchWorker, LoadTask, PreviewTask, ProbeWorker
 
 _RESIZE_MARGIN = 6
 
@@ -66,6 +67,9 @@ class MainWindow(QWidget):
         self._loaded_index = -1
         self._load_token = 0
         self._preview_token = 0
+        self._ai_token = 0
+        self._ai_cancel = threading.Event()
+        self._ai_running = False
         self._worker: BatchWorker | None = None
         self._pool = QThreadPool.globalInstance()
 
@@ -89,6 +93,13 @@ class MainWindow(QWidget):
         self._preview_timer.setInterval(140)
         self._preview_timer.timeout.connect(self._render_preview)
 
+        # The AI preview costs real GPU time, so it only fires once the user
+        # stops fiddling with the controls.
+        self._ai_timer = QTimer(self)
+        self._ai_timer.setSingleShot(True)
+        self._ai_timer.setInterval(700)
+        self._ai_timer.timeout.connect(self._render_ai_preview)
+
         self._probe = ProbeWorker(self)
         self._probe.finished_probe.connect(self._on_devices)
         self._probe.start()
@@ -97,8 +108,14 @@ class MainWindow(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self.shutdown)
 
+    def _remember_output_dir(self) -> None:
+        chosen = getattr(self.inspector, "_chosen_dir", None)
+        self.app_settings.output_dir = str(chosen) if chosen else ""
+        self.app_settings.save_next_to_source = self.inspector.output_dir is None
+
     def shutdown(self) -> None:
         """Stop every background thread. Qt aborts if one outlives the process."""
+        self._ai_cancel.set()
         if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(5000)
@@ -242,6 +259,14 @@ class MainWindow(QWidget):
         self.btn_split.toggled.connect(self._toggle_split)
         self.btn_crop = IconButton("crop", "Crop tool (C)", checkable=True)
         self.btn_crop.toggled.connect(self._toggle_crop)
+        self.btn_ai_preview = IconButton(
+            "sparkle",
+            "Run the real model on the preview (A).\nOff shows a Lanczos stand-in.",
+            checkable=True,
+        )
+        self.btn_ai_preview.setChecked(True)
+        self.btn_ai_preview.toggled.connect(self._toggle_ai_preview)
+        self.preview_badge = badge("preview")
 
         for widget in (self.btn_zoom_out, self.zoom_label, self.btn_zoom_in,
                        self.btn_fit, self.btn_actual):
@@ -251,6 +276,8 @@ class MainWindow(QWidget):
         self.canvas_info.setObjectName("Mono")
         bar_layout.addWidget(self.canvas_info)
         bar_layout.addStretch(1)
+        bar_layout.addWidget(self.preview_badge)
+        bar_layout.addWidget(self.btn_ai_preview)
         bar_layout.addWidget(self.btn_crop)
         bar_layout.addWidget(self.btn_split)
         layout.addWidget(bar)
@@ -277,6 +304,10 @@ class MainWindow(QWidget):
         self.inspector.crop_ratio_changed.connect(self.canvas_set_crop_ratio)
         self.inspector.crop_reset_requested.connect(self._reset_crop)
         self.inspector.apply_to_all_requested.connect(self._apply_settings_to_all)
+        self.inspector.set_output_dir(
+            Path(self.app_settings.output_dir) if self.app_settings.output_dir else None,
+            self.app_settings.save_next_to_source,
+        )
         layout.addWidget(self.inspector, 1)
 
         actions = QWidget()
@@ -356,6 +387,8 @@ class MainWindow(QWidget):
         add("Ctrl+-", lambda: self._zoom_by(1 / 1.25))
         add("C", lambda: self.btn_crop.setChecked(not self.btn_crop.isChecked()))
         add("B", lambda: self.btn_split.setChecked(not self.btn_split.isChecked()))
+        add("A", lambda: self.btn_ai_preview.setChecked(
+            not self.btn_ai_preview.isChecked()))
         add("F11", self._toggle_maximized)
         add("Ctrl+Shift+T", self._toggle_theme)
 
@@ -372,7 +405,7 @@ class MainWindow(QWidget):
         self.btn_theme._name = "sun" if palette.name == "dark" else "moon"
         for button in (self.btn_theme, self.btn_accent, self.btn_add, self.btn_add_folder,
                        self.btn_remove, self.btn_zoom_in, self.btn_zoom_out, self.btn_fit,
-                       self.btn_split, self.btn_crop):
+                       self.btn_split, self.btn_crop, self.btn_ai_preview):
             button.apply_color(palette.text_dim)
         self.inspector.apply_color(palette)
         self.spinner.set_color(palette.accent)
@@ -572,7 +605,10 @@ class MainWindow(QWidget):
     def _schedule_preview(self, immediate: bool = False) -> None:
         if self._loaded is None:
             return
+        self._cancel_ai_preview()
         self._preview_timer.start(0 if immediate else 140)
+        if self.btn_ai_preview.isChecked():
+            self._ai_timer.start()
 
     def _render_preview(self) -> None:
         if self._loaded is None:
@@ -593,6 +629,69 @@ class MainWindow(QWidget):
             QPixmap.fromImage(before), QPixmap.fromImage(after),
             QSize(*self._loaded.size) if self._loaded else None,
         )
+        if not self._ai_running:
+            self._set_preview_badge("fast preview", "")
+
+    # ------------------------------------------------------------ AI preview
+    def _cancel_ai_preview(self) -> None:
+        if self._ai_running:
+            self._ai_cancel.set()
+            self._ai_running = False
+
+    def _render_ai_preview(self) -> None:
+        """Replace the fast preview with a real model pass on a small proxy."""
+        if self._loaded is None or not self.btn_ai_preview.isChecked():
+            return
+        if self.settings.backend == "classic":
+            self._set_preview_badge("resample", "")
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return  # the batch run owns the GPU
+
+        self._cancel_ai_preview()
+        self._ai_cancel = threading.Event()
+        self._ai_token += 1
+        self._ai_running = True
+        self._set_preview_badge("AI preview…", "warn")
+
+        use_gpu, gpu_id, tile = self.inspector.gpu_settings()
+        task = AiPreviewTask(
+            self._ai_token, self._loaded, self.settings.copy(), self._ai_cancel,
+            tile_size=tile, gpu_id=gpu_id, use_gpu=use_gpu,
+        )
+        task.signals.finished.connect(self._on_ai_preview_ready)
+        self._pool.start(task)
+
+    def _on_ai_preview_ready(self, token: int, image, error: str) -> None:
+        if token != self._ai_token:
+            return
+        self._ai_running = False
+        if image is None:
+            if error:
+                self._set_preview_badge("AI preview failed", "err")
+                self.status_label.setText(f"AI preview failed: {error}")
+            else:
+                self._set_preview_badge("fast preview", "")
+            return
+        self.canvas.set_images(self.canvas.before_pixmap(), QPixmap.fromImage(image))
+        self._set_preview_badge("AI preview", "ok")
+
+    def _set_preview_badge(self, text: str, kind: str) -> None:
+        self.preview_badge.setText(text)
+        self.preview_badge.setObjectName(
+            {"ok": "BadgeOk", "warn": "BadgeWarn", "err": "BadgeErr"}.get(kind, "Badge")
+        )
+        self.preview_badge.style().unpolish(self.preview_badge)
+        self.preview_badge.style().polish(self.preview_badge)
+
+    def _toggle_ai_preview(self, enabled: bool) -> None:
+        if enabled:
+            self._schedule_preview()
+        else:
+            self._cancel_ai_preview()
+            self._ai_timer.stop()
+            self._render_preview()
+            self._set_preview_badge("fast preview", "")
 
     def _update_plan_text(self) -> None:
         if self._loaded is None:
@@ -687,6 +786,13 @@ class MainWindow(QWidget):
         out_dir = self.inspector.output_dir
         self.app_settings.gpu_id = gpu_id
         self.app_settings.use_gpu = use_gpu
+        self._remember_output_dir()
+        if out_dir is not None:
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self.toasts.show(f"Cannot create {out_dir}: {exc}", "err", 6000)
+                return
 
         self._worker = BatchWorker(
             self.queue.jobs, indices, out_dir,
@@ -709,6 +815,9 @@ class MainWindow(QWidget):
             self.status_label.setText("Cancelling…")
 
     def _set_running(self, running: bool) -> None:
+        if running:
+            self._ai_timer.stop()
+            self._cancel_ai_preview()
         self.btn_run.setEnabled(not running)
         self.btn_run_all.setEnabled(not running)
         self.btn_cancel.setEnabled(running)
@@ -852,6 +961,7 @@ class MainWindow(QWidget):
             self._worker.cancel()
             self._worker.wait(4000)
         self.shutdown()
+        self._remember_output_dir()
         self.app_settings.save()
         super().closeEvent(event)
 

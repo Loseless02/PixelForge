@@ -99,6 +99,62 @@ class PreviewTask(QRunnable):
             self.signals.finished.emit(self.token, None, None, str(exc))
 
 
+class AiPreviewSignals(QObject):
+    finished = Signal(int, object, str)   # token, QImage, error
+    progress = Signal(int, float, str)
+
+
+class AiPreviewTask(QRunnable):
+    """Runs the real model on a capped-size proxy so the split view is honest.
+
+    Cancellable, because the user will keep moving sliders while it works.
+    """
+
+    def __init__(
+        self,
+        token: int,
+        loaded: imageio.LoadedImage,
+        settings: EditSettings,
+        cancel: threading.Event,
+        *,
+        tile_size: int = 0,
+        gpu_id: int = 0,
+        use_gpu: bool = True,
+    ) -> None:
+        super().__init__()
+        self.signals = AiPreviewSignals()
+        self.token = token
+        self.loaded = loaded
+        self.settings = settings
+        self.cancel = cancel
+        self.tile_size = tile_size
+        self.gpu_id = gpu_id
+        self.use_gpu = use_gpu
+        self.setAutoDelete(True)
+
+    def run(self) -> None:
+        def progress(fraction: float, note: str) -> None:
+            self.signals.progress.emit(self.token, fraction, note)
+
+        try:
+            image = pipeline.render_ai_preview(
+                self.loaded,
+                self.settings,
+                tile_size=self.tile_size,
+                gpu_id=self.gpu_id,
+                use_gpu=self.use_gpu,
+                progress=progress,
+                cancel=self.cancel,
+            )
+        except Cancelled:
+            self.signals.finished.emit(self.token, None, "")
+            return
+        except Exception as exc:
+            self.signals.finished.emit(self.token, None, str(exc))
+            return
+        self.signals.finished.emit(self.token, pil_to_qimage(image), "")
+
+
 # -------------------------------------------------------------- batch runner
 class BatchWorker(QThread):
     """Runs queued jobs one after another on a single background thread."""
