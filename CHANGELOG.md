@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-08-09
+
+### Added
+
+- **Result comparison.** When a render finishes the canvas shows the finished
+  image with the before/after slider already up, the "before" side being the
+  source scaled to matching dimensions with Lanczos. Results are cached per
+  file, so switching away and back keeps the comparison.
+- **Automatic model selection**, and it is now the default. `core.analyze`
+  scores flat-area share, colour variety and edge density on a 256 px proxy to
+  tell photographs from illustrations, and routes to the photo or anime weights
+  per file. The Enhance tab shows the verdict, the confidence and the reasoning
+  for whichever image is selected, with a one-click override.
+- CLI: `-m auto`.
+
+### Changed
+
+- The model, output format, suffix, metadata and overwrite choices now persist
+  between sessions. Previously only the first-ever values were kept.
+
+### Fixed
+
+- A cancelled AI preview still reported back under its original token, so its
+  empty result could overwrite whatever had replaced it on the canvas.
+
 ## [1.1.0] — 2026-08-09
 
 ### Added

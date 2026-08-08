@@ -20,7 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from . import adjust, geometry, imageio
+from . import adjust, analyze, geometry, imageio
 from .backends import get_backend
 from .backends.base import Cancelled, UpscaleError
 from .backends.classic import resample
@@ -34,7 +34,7 @@ AI_PREVIEW_SOURCE_CAP = 520
 
 
 class RenderResult:
-    __slots__ = ("elapsed", "image", "output_path", "plan", "skipped")
+    __slots__ = ("elapsed", "image", "output_path", "plan", "skipped", "source")
 
     def __init__(
         self,
@@ -43,8 +43,11 @@ class RenderResult:
         elapsed: float,
         plan: str,
         skipped: bool = False,
+        source: Image.Image | None = None,
     ) -> None:
         self.image = image
+        # The cropped/rotated original, so callers can build a fair comparison.
+        self.source = source
         self.output_path = output_path
         self.elapsed = elapsed
         self.plan = plan
@@ -52,6 +55,22 @@ class RenderResult:
 
 
 # --------------------------------------------------------------------- stages
+AUTO_MODEL = "auto"
+
+
+def resolve_model(image: Image.Image, settings: EditSettings) -> EditSettings:
+    """Replace the ``auto`` model with whatever suits this particular image.
+
+    Returns ``settings`` untouched when nothing needs resolving, so the common
+    path costs nothing.
+    """
+    if settings.model != AUTO_MODEL or settings.backend == "classic":
+        return settings
+    resolved = settings.copy()
+    resolved.model = analyze.recommend(image)
+    return resolved
+
+
 def effective_fit(settings: EditSettings) -> FitMode:
     """Fit mode for the resample step, given what ``resolve_target`` already did.
 
@@ -195,6 +214,7 @@ def render(
 ) -> Image.Image:
     """Render the full-resolution result in memory."""
     loaded = source if isinstance(source, imageio.LoadedImage) else imageio.load(source)
+    settings = resolve_model(loaded.image, settings)
     image = apply_geometry_stage(loaded.image, settings)
 
     target_w, target_h = geometry.resolve_target(image.width, image.height, settings)
@@ -296,6 +316,7 @@ def render_ai_preview(
     second or two instead of a minute, and the result is resampled into the
     same box the fast preview uses so the two can swap seamlessly.
     """
+    settings = resolve_model(loaded.image, settings)
     preview_w, preview_h, image = preview_size(loaded, settings, max_edge)
 
     if max(image.size) > source_cap:
@@ -413,4 +434,7 @@ def run_job(
     job.result_size = image.size
     job.elapsed = elapsed
     job.message = f"{image.width}x{image.height} in {elapsed:.1f}s"
-    return RenderResult(image, out_path, elapsed, plan_summary(*loaded.size, settings))
+    return RenderResult(
+        image, out_path, elapsed, plan_summary(*loaded.size, settings),
+        source=apply_geometry_stage(loaded.image, settings),
+    )

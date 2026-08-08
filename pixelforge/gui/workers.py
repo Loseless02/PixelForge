@@ -162,7 +162,7 @@ class BatchWorker(QThread):
     job_started = Signal(int)
     job_progress = Signal(int, float, str)
     job_finished = Signal(int, bool, str)         # index, ok, message
-    preview_ready = Signal(int, object)           # index, QImage of the result
+    preview_ready = Signal(int, object, object)   # index, before QImage, after QImage
     all_finished = Signal(int, int)               # succeeded, failed
 
     def __init__(
@@ -230,15 +230,32 @@ class BatchWorker(QThread):
 
             succeeded += 1
             if result.image is not None:
-                thumb = result.image
-                if max(thumb.size) > self.preview_edge:
-                    thumb = thumb.copy()
-                    thumb.thumbnail((self.preview_edge, self.preview_edge),
-                                    Image.Resampling.LANCZOS)
-                self.preview_ready.emit(index, pil_to_qimage(thumb))
+                self._emit_comparison(index, result)
             self.job_finished.emit(index, True, job.message)
 
         self.all_finished.emit(succeeded, failed)
+
+    def _emit_comparison(self, index: int, result) -> None:
+        """Send a matched before/after pair, both at the same display size.
+
+        The "before" is the untouched source scaled up with Lanczos to the
+        result's dimensions. That is the honest baseline: it is what you would
+        have got without the model, shown at the same size, so the slider
+        compares like with like instead of comparing against a smaller image.
+        """
+        after = result.image
+        size = after.size
+        if max(size) > self.preview_edge:
+            scale = self.preview_edge / max(size)
+            size = (max(1, round(size[0] * scale)), max(1, round(size[1] * scale)))
+            after = after.resize(size, Image.Resampling.LANCZOS)
+
+        source = result.source
+        if source is None:
+            self.preview_ready.emit(index, None, pil_to_qimage(after))
+            return
+        before = source.resize(size, Image.Resampling.LANCZOS)
+        self.preview_ready.emit(index, pil_to_qimage(before), pil_to_qimage(after))
 
 
 class ProbeWorker(QThread):

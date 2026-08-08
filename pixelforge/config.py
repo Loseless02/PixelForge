@@ -77,7 +77,7 @@ class AppSettings:
     last_input_dir: str = ""
     output_dir: str = ""            # empty = default_output_dir()
     save_next_to_source: bool = False
-    default_model: str = "realesrgan-x4plus"
+    default_model: str = "auto"
     default_format: str = "PNG"
     jpeg_quality: int = 92
     webp_quality: int = 90

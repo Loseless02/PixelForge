@@ -36,6 +36,7 @@ from ...core.models import (
     Rotation,
     SizeMode,
 )
+from ...core.pipeline import AUTO_MODEL
 from ...core.presets import (
     ASPECT_RATIOS,
     LOOK_PRESETS,
@@ -55,6 +56,16 @@ from .controls import (
 )
 
 _SIZE_MODES = (SizeMode.SCALE, SizeMode.EXACT, SizeMode.LONG_EDGE, SizeMode.PERCENT)
+
+
+def _model_label(key: str) -> str:
+    for backend in BACKENDS.values():
+        for info in backend.models():
+            if info.key == key:
+                return info.label
+    return key
+
+
 _FIT_MODES = (
     (FitMode.COVER, "Cover — fill the box, crop the overflow"),
     (FitMode.CONTAIN, "Contain — fit inside, keep aspect"),
@@ -94,6 +105,7 @@ class SettingsPanel(QWidget):
         # makes sense for the user, but load/reset/look sync happens here.
         self.sliders: dict[str, SliderRow] = {}
         self.flag_toggles: dict[str, LabeledToggle] = {}
+        self._profile = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -344,6 +356,19 @@ class SettingsPanel(QWidget):
         card.add(self.model_combo)
         self.model_hint = hint("")
         card.add(self.model_hint)
+
+        card.add(divider())
+        self.profile_label = QLabel("Analysing the image…")
+        self.profile_label.setObjectName("Mono")
+        self.profile_label.setWordWrap(True)
+        card.add(self.profile_label)
+        self.profile_hint = hint("")
+        card.add(self.profile_hint)
+        self.use_recommended = QPushButton("Use the recommended model")
+        self.use_recommended.setObjectName("Ghost")
+        self.use_recommended.clicked.connect(self._apply_recommended)
+        self.use_recommended.hide()
+        card.add(self.use_recommended)
         layout.addWidget(card)
 
         strength_card = Card("Strength")
@@ -958,26 +983,76 @@ class SettingsPanel(QWidget):
         was_loading = self._loading
         self._loading = True
         self.model_combo.clear()
+        if backend.key != "classic" and models:
+            self.model_combo.addItem("Auto — pick per image", AUTO_MODEL)
         for info in models:
             self.model_combo.addItem(info.label, info.key)
         target = preferred or self.settings.model
         position = max(0, self.model_combo.findData(target))
         self.model_combo.setCurrentIndex(position)
         self._loading = was_loading
-        if models:
+        if self.model_combo.count():
             self.settings.model = self.model_combo.currentData()
-            self.model_hint.setText(models[position].description)
+            self._sync_model_hint(self.settings.model)
+        self._sync_profile_widgets()
+
+    def _sync_model_hint(self, key: str) -> None:
+        if key == AUTO_MODEL:
+            self.model_hint.setText(
+                "Measures each image and chooses between the photo and anime "
+                "models. Per file, so a mixed queue is handled correctly."
+            )
+            return
+        for info in BACKENDS[self.settings.backend].models():
+            if info.key == key:
+                self.model_hint.setText(info.description)
+                return
+        self.model_hint.setText("")
 
     def _on_model(self) -> None:
         key = self.model_combo.currentData()
         if not key:
             return
-        backend = BACKENDS[self.settings.backend]
-        for info in backend.models():
-            if info.key == key:
-                self.model_hint.setText(info.description)
-                break
+        self._sync_model_hint(key)
+        self._sync_profile_widgets()
         self._set("model", key)
+
+    # -------------------------------------------------------- image profile
+    def set_profile(self, image_profile) -> None:
+        """Show what the analyser made of the current image."""
+        self._profile = image_profile
+        if image_profile is None:
+            self.profile_label.setText("Analysing the image…")
+            self.profile_hint.setText("")
+            self.use_recommended.hide()
+            return
+
+        percent = round(image_profile.confidence * 100)
+        name = _model_label(image_profile.model)
+        self.profile_label.setText(
+            f"{image_profile.label}  ·  {percent}% sure  ·  suggests {name}"
+        )
+        self.profile_hint.setText(image_profile.reason)
+        self._sync_profile_widgets()
+
+    def _sync_profile_widgets(self) -> None:
+        image_profile = getattr(self, "_profile", None)
+        if image_profile is None or not hasattr(self, "use_recommended"):
+            return
+        current = self.model_combo.currentData()
+        already = current in (AUTO_MODEL, image_profile.model)
+        self.use_recommended.setVisible(not already)
+        self.use_recommended.setText(
+            f"Switch to {_model_label(image_profile.model)}"
+        )
+
+    def _apply_recommended(self) -> None:
+        image_profile = getattr(self, "_profile", None)
+        if image_profile is None:
+            return
+        index = self.model_combo.findData(image_profile.model)
+        if index >= 0:
+            self.model_combo.setCurrentIndex(index)
 
     def _on_format(self) -> None:
         key = self.format_combo.currentData()

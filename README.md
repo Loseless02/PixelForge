@@ -12,6 +12,9 @@ one-time model download.
 
 - **AI upscaling** with Real-ESRGAN (ncnn/Vulkan). Works on NVIDIA, AMD and
   Intel GPUs, and falls back to CPU.
+- **Picks the model for you.** Measures each image, tells photographs from
+  illustrations, and routes to the right weights — per file, with the reasoning
+  shown and a one-click override.
 - **Any output size.** Pick a factor (x2, x4, …), an exact resolution
   (1200x720), a long-edge target, or a preset (Full HD, 2K, 4K, 8K, A4 at
   300 dpi, Instagram, story, wallpaper).
@@ -32,9 +35,9 @@ one-time model download.
   touched.
 - **CLI** for scripting, sharing the exact same pipeline as the GUI.
 
-| Compare | Strength | Light theme |
+| Result comparison | Automatic model choice | Light theme |
 | --- | --- | --- |
-| ![](docs/screenshot-compare.png) | ![](docs/screenshot-strength.png) | ![](docs/screenshot-light.png) |
+| ![](docs/screenshot-result.png) | ![](docs/screenshot-automodel.png) | ![](docs/screenshot-light.png) |
 
 ---
 
@@ -155,14 +158,40 @@ is usually the better-looking result and 30x faster.
 
 | Model | Best for | Factors |
 | --- | --- | --- |
-| `realesrgan-x4plus` | Photos, general images. Handles JPEG noise. **Default.** | x4 |
+| **`auto`** | **Measures each image and picks between the two below. Default.** | x4 |
+| `realesrgan-x4plus` | Photos, general images. Handles JPEG noise. | x4 |
 | `realesrgan-x4plus-anime` | Illustrations, anime, flat colour art. | x4 |
 | `realesr-animevideov3` | Fast anime model, lowest VRAM. | x2, x3, x4 |
 | `classic` | No AI. Lanczos, bicubic, bilinear, hamming, box, nearest. | any |
 
-Pick `x4plus-anime` for drawings — it sharpens line art far better, and ruins
-photographs. Pick `classic` when you only want a clean downscale or a
-pixel-art-safe nearest-neighbour blow-up.
+Choosing between the photo and anime weights is the single highest-impact
+decision, and they fail in opposite directions: the photo model leaves line art
+mushy, the anime model turns skin and foliage into plastic.
+
+**Auto** measures it instead of guessing. On a 256 px proxy it scores three
+signals — how much of the frame is flat colour, how many distinct colours are
+in use, and how dense the hard edges are — and routes accordingly. The Enhance
+tab shows the verdict, the confidence, and why, for every image you select. It
+runs per file, so a mixed queue is handled correctly.
+
+Override it any time from the same dropdown; when your choice differs from the
+recommendation, a one-click "Switch to …" button appears.
+
+Pick `classic` when you only want a clean downscale or a pixel-art-safe
+nearest-neighbour blow-up.
+
+---
+
+## Comparing the result
+
+When a render finishes, the canvas switches to the finished image with the
+before/after slider already up. The "before" side is your source scaled to the
+same size with Lanczos — the honest baseline, at matching dimensions, so the
+handle compares like with like.
+
+Results stay cached per file: select another image and come back, and the
+comparison is still there. Change any setting and the view returns to the live
+preview, because the cached render no longer reflects what you asked for.
 
 ---
 

@@ -142,7 +142,7 @@ class EditSettings:
 
     # upscaling
     backend: str = "realesrgan"     # realesrgan | classic
-    model: str = "realesrgan-x4plus"
+    model: str = "auto"          # "auto" picks per image, see core.analyze
     resample: str = "lanczos"       # classic resampler / final down-step
     denoise_level: int = -1         # animevideov3 only, -1 = n/a
     face_enhance: bool = False

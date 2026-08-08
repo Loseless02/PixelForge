@@ -45,7 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ai = parser.add_argument_group("upscaler")
     ai.add_argument("-b", "--backend", choices=sorted(BACKENDS), default="realesrgan")
-    ai.add_argument("-m", "--model", default="realesrgan-x4plus")
+    ai.add_argument("-m", "--model", default="auto",
+                    help="Model key, or 'auto' to measure each image and choose "
+                         "between the photo and anime weights.")
     ai.add_argument("--resample", default="lanczos")
     ai.add_argument("--cpu", action="store_true", help="Disable GPU acceleration.")
     ai.add_argument("--gpu-id", type=int, default=0)

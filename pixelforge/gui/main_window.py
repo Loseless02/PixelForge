@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from .. import __app_name__, __version__
 from ..config import AppSettings
-from ..core import imageio, pipeline
+from ..core import analyze, imageio, pipeline
 from ..core.models import EditSettings, Job, JobStatus
 from . import icons, theme
 from .widgets.canvas import CanvasColors, PreviewCanvas
@@ -70,6 +70,9 @@ class MainWindow(QWidget):
         self._ai_token = 0
         self._ai_cancel = threading.Event()
         self._ai_running = False
+        self._showing_result = False
+        # Finished renders, keyed by source path so queue reordering is safe.
+        self._results: dict[Path, tuple[QPixmap | None, QPixmap]] = {}
         self._worker: BatchWorker | None = None
         self._pool = QThreadPool.globalInstance()
 
@@ -108,10 +111,16 @@ class MainWindow(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self.shutdown)
 
-    def _remember_output_dir(self) -> None:
+    def _remember_preferences(self) -> None:
+        """Carry the current choices into the next session."""
         chosen = getattr(self.inspector, "_chosen_dir", None)
         self.app_settings.output_dir = str(chosen) if chosen else ""
         self.app_settings.save_next_to_source = self.inspector.output_dir is None
+        self.app_settings.default_model = self.settings.model
+        self.app_settings.default_format = self.settings.export.format
+        self.app_settings.output_suffix = self.settings.export.suffix
+        self.app_settings.keep_metadata = self.settings.export.keep_metadata
+        self.app_settings.overwrite_policy = self.settings.export.overwrite_policy
 
     def shutdown(self) -> None:
         """Stop every background thread. Qt aborts if one outlives the process."""
@@ -513,8 +522,10 @@ class MainWindow(QWidget):
         self.toasts.show(note, "ok")
 
     def remove_current(self) -> None:
-        if self.queue.current_index() < 0:
+        job = self.queue.current_job()
+        if job is None:
             return
+        self._results.pop(job.source, None)
         self.queue.remove_current()
         self.queue_count.setText(str(len(self.queue.jobs)))
         if not self.queue.jobs:
@@ -532,6 +543,9 @@ class MainWindow(QWidget):
         open_in_explorer(target)
 
     def _clear_finished(self) -> None:
+        for job in self.queue.jobs:
+            if job.status in (JobStatus.DONE, JobStatus.CANCELLED):
+                self._results.pop(job.source, None)
         self.queue.clear_finished()
         self.queue_count.setText(str(len(self.queue.jobs)))
         if not self.queue.jobs:
@@ -543,10 +557,13 @@ class MainWindow(QWidget):
             return
         self.queue.clear()
         self.queue_count.setText("0")
+        self._results.clear()
         self._loaded = None
         self._loaded_index = -1
+        self._showing_result = False
         self.canvas.clear()
         self.canvas_info.clear()
+        self.inspector.set_profile(None)
 
     # -------------------------------------------------------------- loading
     def _request_thumbnail(self, index: int) -> None:
@@ -574,6 +591,7 @@ class MainWindow(QWidget):
         self._load_token += 1
         token = self._load_token
         self.status_label.setText(f"Loading {job.name}…")
+        self.inspector.set_profile(None)
         self.spinner.start()
 
         task = LoadTask(token, job.source)
@@ -593,18 +611,21 @@ class MainWindow(QWidget):
         width, height = loaded.size
         self.inspector.set_source_size(width, height)
         self.canvas.set_images(None, None, QSize(width, height))
-        if self.settings.crop.is_empty:
-            self.canvas.set_crop(self.settings.crop)
-        else:
-            self.canvas.set_crop(self.settings.crop)
+        self.canvas.set_crop(self.settings.crop)
         self.canvas_info.setText(f"{loaded.path.name}   ·   {width} x {height}")
         self.status_label.setText(f"{loaded.path.name} loaded")
+        self.inspector.set_profile(analyze.profile(loaded.image))
+
+        job = self.queue.current_job()
+        if job is not None and self._show_result(job):
+            return
         self._schedule_preview(immediate=True)
 
     # -------------------------------------------------------------- preview
     def _schedule_preview(self, immediate: bool = False) -> None:
         if self._loaded is None:
             return
+        self._leave_result_view()
         self._cancel_ai_preview()
         self._preview_timer.start(0 if immediate else 140)
         if self.btn_ai_preview.isChecked():
@@ -637,6 +658,9 @@ class MainWindow(QWidget):
         if self._ai_running:
             self._ai_cancel.set()
             self._ai_running = False
+            # Bump the token as well: a cancelled task still reports back, and
+            # without this its empty result would overwrite whatever replaced it.
+            self._ai_token += 1
 
     def _render_ai_preview(self) -> None:
         """Replace the fast preview with a real model pass on a small proxy."""
@@ -685,6 +709,8 @@ class MainWindow(QWidget):
         self.preview_badge.style().polish(self.preview_badge)
 
     def _toggle_ai_preview(self, enabled: bool) -> None:
+        if self._showing_result:
+            return  # a finished render already beats any preview
         if enabled:
             self._schedule_preview()
         else:
@@ -786,7 +812,7 @@ class MainWindow(QWidget):
         out_dir = self.inspector.output_dir
         self.app_settings.gpu_id = gpu_id
         self.app_settings.use_gpu = use_gpu
-        self._remember_output_dir()
+        self._remember_preferences()
         if out_dir is not None:
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -844,11 +870,43 @@ class MainWindow(QWidget):
         if not ok and message and message != "Cancelled":
             self.toasts.show(f"{self.queue.jobs[index].name}: {message}", "err", 6000)
 
-    def _on_result_preview(self, index: int, image) -> None:
-        if index != self.queue.current_index():
+    def _on_result_preview(self, index: int, before, after) -> None:
+        if not 0 <= index < len(self.queue.jobs):
             return
-        pixmap = QPixmap.fromImage(image)
-        self.canvas.set_images(self.canvas.before_pixmap(), pixmap)
+        job = self.queue.jobs[index]
+        pair = (
+            QPixmap.fromImage(before) if before is not None else None,
+            QPixmap.fromImage(after),
+        )
+        self._results[job.source] = pair
+        if index == self.queue.current_index():
+            self._show_result(job)
+
+    def _show_result(self, job: Job) -> bool:
+        """Put the finished render on the canvas with the comparison slider up."""
+        pair = self._results.get(job.source)
+        if pair is None:
+            return False
+        before, after = pair
+        self._ai_timer.stop()
+        self._cancel_ai_preview()
+        self._showing_result = True
+
+        source_size = QSize(*job.source_size) if job.source_size else None
+        self.canvas.set_images(before, after, source_size)
+        if before is not None and not self.btn_split.isChecked():
+            self.btn_split.setChecked(True)
+        self._set_preview_badge("result", "ok")
+        if job.result_size:
+            self.canvas_info.setText(
+                f"{job.name}   ·   {job.result_size[0]} x {job.result_size[1]}"
+            )
+        return True
+
+    def _leave_result_view(self) -> None:
+        if self._showing_result:
+            self._showing_result = False
+            self._set_preview_badge("preview", "")
 
     def _on_run_finished(self, succeeded: int, failed: int) -> None:
         self._set_running(False)
@@ -860,7 +918,9 @@ class MainWindow(QWidget):
             self.toasts.show(f"{failed} file(s) failed.", "err", 5000)
         elif succeeded:
             job = next((j for j in reversed(self.queue.jobs) if j.output), None)
-            self.toasts.show(f"{succeeded} file(s) written.", "ok")
+            self.toasts.show(
+                f"{succeeded} file(s) written. Drag the handle to compare.", "ok"
+            )
             if job is not None and job.output is not None:
                 self.status_label.setText(f"Saved to {job.output.parent}")
                 self._last_output_dir = job.output.parent
@@ -961,7 +1021,7 @@ class MainWindow(QWidget):
             self._worker.cancel()
             self._worker.wait(4000)
         self.shutdown()
-        self._remember_output_dir()
+        self._remember_preferences()
         self.app_settings.save()
         super().closeEvent(event)
 

@@ -94,6 +94,31 @@ def test_run_job_writes_the_file(sample_image: Path, tmp_path: Path):
         assert written.size == (240, 160)
 
 
+def test_run_job_returns_the_source_for_comparison(sample_image: Path, tmp_path: Path):
+    settings = classic(size_mode=SizeMode.SCALE, scale=2.0)
+    result = pipeline.run_job(Job(source=sample_image, settings=settings), tmp_path)
+
+    assert result.source is not None
+    # Same aspect as the result, so a before/after slider lines up.
+    assert result.source.size == (120, 80)
+    assert result.image.size == (240, 160)
+
+
+def test_run_job_source_reflects_the_crop(sample_image: Path, tmp_path: Path):
+    settings = classic(size_mode=SizeMode.SCALE, scale=2.0,
+                       crop=CropRect(10, 10, 40, 20))
+    result = pipeline.run_job(Job(source=sample_image, settings=settings), tmp_path)
+    assert result.source.size == (40, 20)
+
+
+def test_skipped_job_carries_no_images(sample_image: Path, tmp_path: Path):
+    settings = classic(size_mode=SizeMode.SCALE, scale=1.0)
+    settings.export.overwrite_policy = "skip"
+    pipeline.run_job(Job(source=sample_image, settings=settings), tmp_path)
+    second = pipeline.run_job(Job(source=sample_image, settings=settings), tmp_path)
+    assert second.skipped and second.image is None and second.source is None
+
+
 def test_run_job_suffix_policy_never_overwrites(sample_image: Path, tmp_path: Path):
     settings = classic(size_mode=SizeMode.SCALE, scale=1.0)
     settings.export.overwrite_policy = "suffix"
